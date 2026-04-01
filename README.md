@@ -2,8 +2,6 @@
 
 Renders an animated HTML file as your desktop wallpaper using WebKit2GTK.
 
-![AEGIS Digital Terrain](https://img.shields.io/badge/engine-WebKit2GTK-blue)
-
 ## How it works
 
 1. **`html-wallpaper.py`** opens a GTK window with a WebKit2 browser engine inside it — the same engine Safari uses, so canvas animations, WebGL, etc. all work.
@@ -74,7 +72,7 @@ pkill -f html-wallpaper.py
 
 ---
 
-## System-wide deploy — all users (IPA, LDAP, local)
+## System-wide deploy — all users
 
 Run `deploy-wallpaper.sh` as root:
 
@@ -142,6 +140,6 @@ To get the exact font, download `ShareTechMono-Regular.ttf` on another machine a
 |---|---|
 | `html-wallpaper.py` | Python script — WebKit2GTK browser in a DESKTOP-type window |
 | `html-wallpaper.sh` | Launcher — kills old instance, starts new one |
-| `dt-a-v3-dynamic.html` | The animated wallpaper (AEGIS cyber defence theme) |
+| `dt-a-v3-dynamic.html` | The animated wallpaper |
 | `deploy-wallpaper.sh` | System-wide installer (run as root) |
 | `kickstart-wallpaper.ks` | Kickstart snippet — `%include` in your existing ks.cfg |
