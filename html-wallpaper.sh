@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# html-wallpaper.sh — Launch the HTML wallpaper.
+# Usage: html-wallpaper.sh [path-to-html]
+#
+# This runs from a GNOME autostart .desktop file, which means the session
+# environment (DISPLAY, XAUTHORITY, DBUS_SESSION_BUS_ADDRESS) is already
+# set. We just need to kill any old instance and launch.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HTML="${1:-$SCRIPT_DIR/dt-a-v3-dynamic.html}"
+
+# Kill any previous instance
+pkill -f 'html-wallpaper.py' 2>/dev/null
+sleep 0.5
+
+exec python3 "$SCRIPT_DIR/html-wallpaper.py" "$HTML"
