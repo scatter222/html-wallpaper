@@ -23,12 +23,15 @@ canvas { position:absolute; inset:0; width:100%; height:100%; }
 const CONFIG = {
 
   // ── Label text ────────────────────────────────────────────────────────
-  title:    'HECTIC SYSTEM',          // large text below the shield
+  title:    'CYBER SYSTEM',          // large text below the shield
   subtitle: 'BEST IRON DOME',  // smaller line beneath
 
   // ── Colour theme — switch between 'blue' and 'pink' ──────────────────
   //    or define your own palette in the THEMES object below
   theme: 'blue',
+
+  // ── Performance — lower FPS = less CPU. 15 looks smooth for a wallpaper.
+  targetFPS: 15,
 
 };
 
@@ -225,29 +228,46 @@ function buildShield(cx,cy,sr){
   return{faceData,outline,cx,cy,sr,TOP,BOT};
 }
 
-// ── DRAW SHIELD ──────────────────────────────────────────────────────────────
+// ── DRAW SHIELD (cached to offscreen canvas, redrawn every ~2s) ─────────────
+let _shieldCache=null, _shieldCacheTime=-999;
+const SHIELD_CACHE_INTERVAL=2; // seconds between full redraws
 function drawShield(ctx,sh,elapsed,alpha=1){
-  const{faceData,outline,cx,cy}=sh;
-  ctx.save(); ctx.globalAlpha=alpha;
-  const shimmer=Math.sin(elapsed*TAU/LOOP*2)*0.06;
-  const pulse=0.7+Math.sin(elapsed*TAU/LOOP*1.5)*0.3;
-  faceData.forEach(f=>{
-    const[ax,ay]=f.pts[f.t[0]],[bx,by]=f.pts[f.t[1]],[cx2,cy2]=f.pts[f.t[2]];
-    const br=clamp(f.brightness+shimmer*(f.catchLight?1.8:0.3),0,1);
-    ctx.beginPath();ctx.moveTo(ax,ay);ctx.lineTo(bx,by);ctx.lineTo(cx2,cy2);ctx.closePath();
-    ctx.fillStyle=`rgb(${Math.round(br*(f.hueLean<0.3?6:12))},${Math.round(br*(120+f.hueLean*40))},${Math.round(br*255)})`;
-    ctx.fill();
-    ctx.strokeStyle=f.catchLight?`rgba(120,230,255,${0.55*pulse})`:'rgba(20,100,200,0.14)';
-    ctx.lineWidth=f.catchLight?1.1:0.5; ctx.stroke();
-  });
-  for(let i=4;i>=1;i--){
-    ctx.save();ctx.shadowColor='rgba(30,160,255,1)';ctx.shadowBlur=i*16;
-    ctx.beginPath();outline.forEach(([x,y],j)=>j===0?ctx.moveTo(x,y):ctx.lineTo(x,y));
-    ctx.closePath();ctx.strokeStyle=`rgba(30,160,255,${0.07*(5-i)*pulse})`;
-    ctx.lineWidth=i*3.5;ctx.stroke();ctx.restore();
+  const{faceData,outline,cx,cy,sr,TOP,BOT}=sh;
+  // Bounding box for the offscreen canvas (with padding for glow)
+  const pad=30, bx=cx-sr-pad, by=cy+TOP-pad, bw=(sr+pad)*2, bh=(BOT-TOP)+pad*2;
+
+  if(!_shieldCache||elapsed-_shieldCacheTime>=SHIELD_CACHE_INTERVAL){
+    if(!_shieldCache){
+      _shieldCache=document.createElement('canvas');
+      _shieldCache.width=bw; _shieldCache.height=bh;
+    }
+    const sc=_shieldCache.getContext('2d');
+    sc.clearRect(0,0,bw,bh);
+    sc.save(); sc.translate(-bx,-by);
+    const shimmer=Math.sin(elapsed*TAU/LOOP*2)*0.06;
+    const pulse=0.7+Math.sin(elapsed*TAU/LOOP*1.5)*0.3;
+    faceData.forEach(f=>{
+      const[ax,ay]=f.pts[f.t[0]],[bx2,by2]=f.pts[f.t[1]],[cx2,cy2]=f.pts[f.t[2]];
+      const br=clamp(f.brightness+shimmer*(f.catchLight?1.8:0.3),0,1);
+      sc.beginPath();sc.moveTo(ax,ay);sc.lineTo(bx2,by2);sc.lineTo(cx2,cy2);sc.closePath();
+      sc.fillStyle=`rgb(${Math.round(br*(f.hueLean<0.3?6:12))},${Math.round(br*(120+f.hueLean*40))},${Math.round(br*255)})`;
+      sc.fill();
+      sc.strokeStyle=f.catchLight?`rgba(120,230,255,${0.55*pulse})`:'rgba(20,100,200,0.14)';
+      sc.lineWidth=f.catchLight?1.1:0.5; sc.stroke();
+    });
+    for(let i=4;i>=1;i--){
+      sc.save();sc.shadowColor='rgba(30,160,255,1)';sc.shadowBlur=i*6;
+      sc.beginPath();outline.forEach(([x,y],j)=>j===0?sc.moveTo(x,y):sc.lineTo(x,y));
+      sc.closePath();sc.strokeStyle=`rgba(30,160,255,${0.07*(5-i)*pulse})`;
+      sc.lineWidth=i*3.5;sc.stroke();sc.restore();
+    }
+    sc.beginPath();outline.forEach(([x,y],j)=>j===0?sc.moveTo(x,y):sc.lineTo(x,y));
+    sc.closePath();sc.strokeStyle=`rgba(100,210,255,${0.75*pulse})`;sc.lineWidth=1.6;sc.stroke();
+    sc.restore();
+    _shieldCacheTime=elapsed;
   }
-  ctx.beginPath();outline.forEach(([x,y],j)=>j===0?ctx.moveTo(x,y):ctx.lineTo(x,y));
-  ctx.closePath();ctx.strokeStyle=`rgba(100,210,255,${0.75*pulse})`;ctx.lineWidth=1.6;ctx.stroke();
+  ctx.save(); ctx.globalAlpha=alpha;
+  ctx.drawImage(_shieldCache,bx,by);
   ctx.restore();
 }
 
@@ -355,7 +375,9 @@ function rebuildScene(){
 
 // ── ANIMATE ──────────────────────────────────────────────────────────────────
 let t0=null;
-function animate(ts){
+const FRAME_INTERVAL=1000/(CONFIG.targetFPS||15);
+function animate(){
+  const ts=performance.now();
   if(!t0)t0=ts;
   const el=(ts-t0)/1000, t=el%LOOP;
   c3.clearRect(0,0,W,H); c4.clearRect(0,0,W,H);
@@ -394,7 +416,7 @@ function animate(ts){
     const bx=lerp(PEAK_X,ix,beamProg), by=lerp(PEAK_Y_NEAR-55,iy,beamProg);
     if(prog<m.interceptAt){
       c3.save();
-      c3.shadowColor=alt(0.9);c3.shadowBlur=14;
+      c3.shadowColor=alt(0.9);c3.shadowBlur=6;
       const bg2=c3.createLinearGradient(PEAK_X,PEAK_Y_NEAR-55,bx,by);
       bg2.addColorStop(0,alt(0.55));bg2.addColorStop(0.7,alt(0.45));bg2.addColorStop(1,alt(0.9));
       c3.strokeStyle=bg2;c3.lineWidth=2+beamProg;c3.lineCap='round';
@@ -423,7 +445,7 @@ function animate(ts){
       tg.addColorStop(0,thr(0));tg.addColorStop(0.6,thr(0));tg.addColorStop(1,thr(pa*.7));
       c3.strokeStyle=tg;c3.lineWidth=m.size*.55;c3.lineCap='round';
       c3.beginPath();c3.moveTo(prevPx,prevPy);c3.lineTo(px,py);c3.stroke();
-      c3.shadowColor=thr(1);c3.shadowBlur=16;
+      c3.shadowColor=thr(1);c3.shadowBlur=6;
       c3.beginPath();c3.arc(px,py,m.size,0,TAU);c3.fillStyle=thr(pa);c3.fill();
       c3.beginPath();c3.arc(px,py,m.size*.4,0,TAU);c3.fillStyle=`rgba(255,220,200,${pa})`;c3.fill();
       c3.restore();
@@ -439,7 +461,7 @@ function animate(ts){
       }
       if(ep<0.5){
         const flash=(0.5-ep)/0.5;
-        c3.globalAlpha=flash*0.85;c3.shadowColor='rgba(0,220,255,0.9)';c3.shadowBlur=20;
+        c3.globalAlpha=flash*0.85;c3.shadowColor='rgba(0,220,255,0.9)';c3.shadowBlur=8;
         c3.beginPath();c3.arc(px,py,ep*70,0,TAU);
         c3.strokeStyle=`rgba(0,220,255,${flash*0.8})`;c3.lineWidth=2*(1-ep);c3.stroke();
         c3.beginPath();c3.arc(px,py,ep*35,0,TAU);
@@ -498,10 +520,10 @@ function animate(ts){
   // Main title — two passes: outer glow then crisp
   const titlePulse=0.72+Math.sin(t*TAU/LOOP*1.5)*0.18;
   c4.font='bold 46px "Share Tech Mono"';
-  c4.shadowColor=`rgba(${T.titleGlow.join(',')},0.9)`; c4.shadowBlur=32;
+  c4.shadowColor=`rgba(${T.titleGlow.join(',')},0.9)`; c4.shadowBlur=12;
   c4.fillStyle=`rgba(${T.accent.join(',')},${titlePulse*0.5})`;
   c4.fillText(CONFIG.title, W/2, labelY);
-  c4.shadowBlur=10;
+  c4.shadowBlur=4;
   c4.fillStyle=`rgba(${T.titleLight.join(',')},${titlePulse})`;
   c4.fillText(CONFIG.title, W/2, labelY);
 
@@ -512,8 +534,7 @@ function animate(ts){
   c4.fillText(CONFIG.subtitle, W/2, labelY+22);
 
   c4.restore();
-
-  requestAnimationFrame(animate);
+  setTimeout(animate, FRAME_INTERVAL);
 }
 
 // ── BOOT ─────────────────────────────────────────────────────────────────────
@@ -527,7 +548,7 @@ function boot(){
     return;
   }
   rebuildScene();
-  requestAnimationFrame(animate);
+  animate();
 }
 if(document.readyState==='complete'){
   boot();

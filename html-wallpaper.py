@@ -34,6 +34,7 @@ else:
     sys.exit(1)
 
 from gi.repository import Gtk, Gdk, WebKit2, GLib
+import cairo
 
 
 def get_html_path():
@@ -77,7 +78,12 @@ def main():
     win.set_type_hint(Gdk.WindowTypeHint.DESKTOP)
 
     # --- webview setup ---
-    webview = WebKit2.WebView()
+    # Use a single process (no network worker, no service workers).
+    # This is a local file wallpaper — we don't need multi-process security.
+    ctx = WebKit2.WebContext.get_default()
+    ctx.set_cache_model(WebKit2.CacheModel.DOCUMENT_VIEWER)
+
+    webview = WebKit2.WebView.new_with_context(ctx)
 
     settings = webview.get_settings()
     settings.set_enable_javascript(True)
@@ -85,14 +91,28 @@ def main():
     settings.set_hardware_acceleration_policy(
         WebKit2.HardwareAccelerationPolicy.ALWAYS
     )
+    settings.set_enable_page_cache(False)
     settings.set_enable_write_console_messages_to_stdout(True)
     webview.set_settings(settings)
 
     webview.set_background_color(Gdk.RGBA(0, 0, 0, 1))
 
+    # Suppress WebKit's right-click context menu (reload/back/forward)
+    webview.connect("context-menu", lambda *_: True)
+
     win.add(webview)
     webview.load_uri(html_uri)
     print(f"Loading: {html_uri}", flush=True)
+
+    # Make the window click-through: set an empty input shape so all mouse
+    # events pass to the desktop underneath (right-click menus, icons, etc.)
+    def on_realize(widget):
+        gdk_win = widget.get_window()
+        empty = cairo.Region(cairo.RectangleInt(0, 0, 0, 0))
+        gdk_win.input_shape_combine_region(empty, 0, 0)
+        print("Input passthrough enabled", flush=True)
+
+    win.connect("realize", on_realize)
 
     win.connect("destroy", lambda *_: Gtk.main_quit())
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, Gtk.main_quit)

@@ -13,4 +13,13 @@ HTML="${1:-$SCRIPT_DIR/dt-a-v3-dynamic.html}"
 pkill -f 'html-wallpaper.py' 2>/dev/null
 sleep 0.5
 
-exec python3 "$SCRIPT_DIR/html-wallpaper.py" "$HTML"
+# Strip snap/flatpak library paths that break GTK imports when launched
+# from inside a snap terminal (e.g. VS Code). Harmless on clean systems.
+exec env -i \
+  HOME="$HOME" \
+  DISPLAY="${DISPLAY:-:0}" \
+  XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}" \
+  DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+  XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+  PATH="/usr/local/bin:/usr/bin:/bin" \
+  python3 "$SCRIPT_DIR/html-wallpaper.py" "$HTML"
