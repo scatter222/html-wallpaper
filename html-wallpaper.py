@@ -48,15 +48,16 @@ def has_real_gpu():
     Return True if a non-software GPU is available.
     llvmpipe / softpipe are Mesa software renderers — they will burn CPU
     doing full-screen canvas compositing.  On a server with no discrete GPU
-    we want software rendering OFF so WebKit uses its own CPU canvas path,
-    which is far more efficient than software GL.
+    we want hardware acceleration NEVER so WebKit uses its own CPU canvas
+    path, which is far more efficient than software GL.
     """
+    import subprocess
+
+    # Method 1: try glxinfo (mesa-demos / mesa-utils package)
     try:
-        import subprocess
         out = subprocess.check_output(
             ["glxinfo", "-B"], stderr=subprocess.DEVNULL, text=True, timeout=3
         )
-        # Software renderers
         software = ("llvmpipe", "softpipe", "swr", "software rasterizer",
                     "VMware SVGA", "virgl")
         renderer_line = next(
@@ -64,6 +65,32 @@ def has_real_gpu():
         )
         print(f"GL renderer: {renderer_line.strip()}", flush=True)
         return not any(s.lower() in renderer_line.lower() for s in software)
+    except FileNotFoundError:
+        print("glxinfo not found, trying /proc fallback...", flush=True)
+    except Exception as e:
+        print(f"glxinfo failed ({e}), trying /proc fallback...", flush=True)
+
+    # Method 2: check for DRI render nodes (works without glxinfo)
+    # Real GPUs expose /dev/dri/renderD128+; absent on pure-software systems
+    try:
+        import glob as _glob
+        render_nodes = _glob.glob("/dev/dri/renderD*")
+        if not render_nodes:
+            print("No /dev/dri/renderD* nodes — no real GPU", flush=True)
+            return False
+        # Check if the driver behind the render node is a known software one
+        for node in render_nodes:
+            node_name = os.path.basename(node)
+            driver_path = f"/sys/class/drm/{node_name}/device/driver"
+            if os.path.islink(driver_path):
+                driver = os.path.basename(os.readlink(driver_path))
+                print(f"DRI node {node_name}: driver={driver}", flush=True)
+                if driver in ("vgem", "virtio-gpu", "virtio_gpu",
+                              "vmwgfx", "bochs-drm", "bochs_drm"):
+                    continue  # virtual/software — keep checking
+                return True  # found a real hardware driver
+        print("All DRI nodes are virtual/software — no real GPU", flush=True)
+        return False
     except Exception as e:
         print(f"GPU check failed ({e}) — assuming no real GPU", flush=True)
         return False
@@ -104,26 +131,24 @@ def main():
     settings = webview.get_settings()
 
     settings.set_enable_javascript(True)
-    settings.set_enable_webgl(True)
-    settings.set_hardware_acceleration_policy(
-        WebKit2.HardwareAccelerationPolicy.ALWAYS
-    )
     settings.set_enable_page_cache(False)
     settings.set_enable_write_console_messages_to_stdout(True)
 
-    # ── FIX: Hardware acceleration policy ───────────────────────────────────
-    # ALWAYS forces Mesa llvmpipe software GL on servers with no discrete GPU.
-    # llvmpipe rasterising a 60fps full-screen canvas animation uses every CPU
-    # core flat-out.  ON_DEMAND lets WebKit decide — on a real GPU it uses it,
-    # on a server it falls back to WebKit's own CPU canvas path which is
-    # purpose-built for 2D and far cheaper than software GL.
+    # ── Hardware acceleration policy ────────────────────────────────────────
+    # ALWAYS  = force GPU compositing (great with real GPU, catastrophic with
+    #           llvmpipe — burns every CPU core doing software GL)
+    # NEVER   = CPU-only 2D path — WebKit's built-in canvas renderer, purpose-
+    #           built for 2D and very efficient.  Safe because our HTML uses
+    #           only Canvas 2D, not WebGL.
     gpu = has_real_gpu()
     if gpu:
         policy = WebKit2.HardwareAccelerationPolicy.ALWAYS
-        print("Real GPU detected — hardware acceleration ON", flush=True)
+        settings.set_enable_webgl(True)
+        print("Real GPU detected — hardware acceleration ALWAYS", flush=True)
     else:
-        policy = WebKit2.HardwareAccelerationPolicy.ON_DEMAND
-        print("No real GPU — hardware acceleration ON_DEMAND (avoids llvmpipe)", flush=True)
+        policy = WebKit2.HardwareAccelerationPolicy.NEVER
+        settings.set_enable_webgl(False)
+        print("No real GPU — hardware acceleration NEVER (pure CPU 2D)", flush=True)
 
     settings.set_hardware_acceleration_policy(policy)
     webview.set_settings(settings)

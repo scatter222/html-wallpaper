@@ -7,15 +7,13 @@
 * { margin:0; padding:0; box-sizing:border-box; }
 html,body { width:100vw; height:100vh; overflow:hidden; background:#010810; }
 canvas { position:absolute; inset:0; width:100%; height:100%; }
-#c2{z-index:2;}#c3{z-index:3;}#c4{z-index:4;}
+#cStatic{z-index:1;}#cDyn{z-index:2;}
 </style>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
 </head>
 <body>
-<canvas id="c1"></canvas>
-<canvas id="c2"></canvas>
-<canvas id="c3"></canvas>
-<canvas id="c4"></canvas>
+<canvas id="cStatic"></canvas>
+<canvas id="cDyn"></canvas>
 <script>
 // ═════════════════════════════════════════════════════════════════════════
 //  ✏️  EDIT HERE — change label text and colour theme
@@ -36,14 +34,6 @@ const CONFIG = {
 };
 
 // ── Colour themes ─────────────────────────────────────────────────────────────
-// Each theme defines:
-//   accent     — main glow / UI chrome colour  (r,g,b)
-//   accentAlt  — secondary / intercept beam    (r,g,b)
-//   threat     — incoming missile colour       (r,g,b)
-//   titleLight — title text bright pass        (r,g,b)
-//   titleGlow  — title outer glow              (r,g,b)
-//   terrainLow — terrain face darkest colour   (r,g,b)
-//   terrainHi  — terrain face brightest colour (r,g,b)
 const THEMES = {
   blue: {
     accent:      [30,  159, 255],
@@ -73,30 +63,36 @@ const THEMES = {
   },
 };
 
-// Resolve the active palette once — used everywhere below
 const T = THEMES[CONFIG.theme] || THEMES.blue;
-// Shorthand helpers
-const ac  = (a=1) => `rgba(${T.accent.join(',')},${a})`;      // accent colour
-const alt = (a=1) => `rgba(${T.accentAlt.join(',')},${a})`;   // accent alt
-const thr = (a=1) => `rgba(${T.threat.join(',')},${a})`;       // threat colour
+
+// ── Pre-computed color strings (avoid per-frame allocations) ──────────────────
+const _colorCache = {};
+function ac(a=1){
+  const k = 'ac'+a;
+  return _colorCache[k] || (_colorCache[k] = `rgba(${T.accent[0]},${T.accent[1]},${T.accent[2]},${a})`);
+}
+function alt(a=1){
+  const k = 'al'+a;
+  return _colorCache[k] || (_colorCache[k] = `rgba(${T.accentAlt[0]},${T.accentAlt[1]},${T.accentAlt[2]},${a})`);
+}
+function thr(a=1){
+  const k = 'th'+a;
+  return _colorCache[k] || (_colorCache[k] = `rgba(${T.threat[0]},${T.threat[1]},${T.threat[2]},${a})`);
+}
 
 const TAU=Math.PI*2, LOOP=16;
-const c1=document.getElementById('c1').getContext('2d');
-const c2=document.getElementById('c2').getContext('2d');
-const c3=document.getElementById('c3').getContext('2d');
-const c4=document.getElementById('c4').getContext('2d');
+const csCtx=document.getElementById('cStatic').getContext('2d');
+const cdCtx=document.getElementById('cDyn').getContext('2d');
 
 // ── DYNAMIC SIZING ───────────────────────────────────────────────────────────
 let W=window.innerWidth, H=window.innerHeight;
 
 function resizeCanvases(){
-  // Guard: never let W or H be 0 — that would divide-by-zero in terrainH
-  // and corrupt the Delaunay triangulation with NaN coordinates.
   const w=window.innerWidth  || document.documentElement.clientWidth  || 1920;
   const h=window.innerHeight || document.documentElement.clientHeight || 1080;
-  if(w<10||h<10)return; // layout not ready yet, skip
+  if(w<10||h<10)return;
   W=w; H=h;
-  [c1,c2,c3,c4].forEach(ctx=>{
+  [csCtx,cdCtx].forEach(ctx=>{
     ctx.canvas.width=W; ctx.canvas.height=H;
   });
 }
@@ -104,7 +100,6 @@ resizeCanvases();
 
 window.addEventListener('resize',()=>{
   resizeCanvases();
-  // Debounce: wait 100ms after resize stops before rebuilding the heavy terrain mesh
   clearTimeout(window._rebuildTimer);
   window._rebuildTimer=setTimeout(rebuildScene, 100);
 });
@@ -112,7 +107,7 @@ window.addEventListener('resize',()=>{
 // ── UTILS ────────────────────────────────────────────────────────────────────
 function rand(a,b){return a+Math.random()*(b-a);}
 function lerp(a,b,t){return a+(b-a)*t;}
-function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function clamp(v,a,b){return v<a?a:v>b?b:v;}
 
 // ── DELAUNAY ─────────────────────────────────────────────────────────────────
 function delaunay(points){
@@ -141,7 +136,6 @@ function delaunay(points){
 }
 
 // ── TERRAIN HEIGHT ───────────────────────────────────────────────────────────
-// Pure function — reads W from outer scope, safe after any resize
 function terrainH(x,seed=0){
   const nx=x/W; let h=0;
   h+=Math.sin(nx*Math.PI*1.8+seed+0.3)*210;
@@ -156,7 +150,6 @@ function terrainH(x,seed=0){
 }
 
 // ── BUILD TERRAIN LAYER ──────────────────────────────────────────────────────
-// Takes a layer definition, returns pre-computed face data ready to draw
 function buildTerrainLayer(layer){
   const{seed,baseY,amplitude,colorBase,colorPeak,fog}=layer;
   const COLS=80, pts=[];
@@ -229,17 +222,17 @@ function buildShield(cx,cy,sr){
 }
 
 // ── DRAW SHIELD (cached to offscreen canvas, redrawn every ~2s) ─────────────
-let _shieldCache=null, _shieldCacheTime=-999;
-const SHIELD_CACHE_INTERVAL=2; // seconds between full redraws
+let _shieldCache=null, _shieldCacheTime=-999, _shieldBounds=null;
+const SHIELD_CACHE_INTERVAL=2;
 function drawShield(ctx,sh,elapsed,alpha=1){
   const{faceData,outline,cx,cy,sr,TOP,BOT}=sh;
-  // Bounding box for the offscreen canvas (with padding for glow)
   const pad=30, bx=cx-sr-pad, by=cy+TOP-pad, bw=(sr+pad)*2, bh=(BOT-TOP)+pad*2;
 
   if(!_shieldCache||elapsed-_shieldCacheTime>=SHIELD_CACHE_INTERVAL){
     if(!_shieldCache){
       _shieldCache=document.createElement('canvas');
       _shieldCache.width=bw; _shieldCache.height=bh;
+      _shieldBounds={bx,by,bw,bh};
     }
     const sc=_shieldCache.getContext('2d');
     sc.clearRect(0,0,bw,bh);
@@ -252,17 +245,17 @@ function drawShield(ctx,sh,elapsed,alpha=1){
       sc.beginPath();sc.moveTo(ax,ay);sc.lineTo(bx2,by2);sc.lineTo(cx2,cy2);sc.closePath();
       sc.fillStyle=`rgb(${Math.round(br*(f.hueLean<0.3?6:12))},${Math.round(br*(120+f.hueLean*40))},${Math.round(br*255)})`;
       sc.fill();
-      sc.strokeStyle=f.catchLight?`rgba(120,230,255,${0.55*pulse})`:'rgba(20,100,200,0.14)';
+      sc.strokeStyle=f.catchLight?`rgba(120,230,255,${(0.55*pulse).toFixed(2)})`:'rgba(20,100,200,0.14)';
       sc.lineWidth=f.catchLight?1.1:0.5; sc.stroke();
     });
+    // Outline glow — pre-rendered, no shadowBlur needed in animation loop
     for(let i=4;i>=1;i--){
-      sc.save();sc.shadowColor='rgba(30,160,255,1)';sc.shadowBlur=i*6;
       sc.beginPath();outline.forEach(([x,y],j)=>j===0?sc.moveTo(x,y):sc.lineTo(x,y));
-      sc.closePath();sc.strokeStyle=`rgba(30,160,255,${0.07*(5-i)*pulse})`;
-      sc.lineWidth=i*3.5;sc.stroke();sc.restore();
+      sc.closePath();sc.strokeStyle=`rgba(30,160,255,${(0.07*(5-i)*pulse).toFixed(3)})`;
+      sc.lineWidth=i*3.5;sc.stroke();
     }
     sc.beginPath();outline.forEach(([x,y],j)=>j===0?sc.moveTo(x,y):sc.lineTo(x,y));
-    sc.closePath();sc.strokeStyle=`rgba(100,210,255,${0.75*pulse})`;sc.lineWidth=1.6;sc.stroke();
+    sc.closePath();sc.strokeStyle=`rgba(100,210,255,${(0.75*pulse).toFixed(2)})`;sc.lineWidth=1.6;sc.stroke();
     sc.restore();
     _shieldCacheTime=elapsed;
   }
@@ -271,39 +264,102 @@ function drawShield(ctx,sh,elapsed,alpha=1){
   ctx.restore();
 }
 
-// ── DRAW TOPO LINES ──────────────────────────────────────────────────────────
-function drawTopoLines(ctx){
+// ── OFFSCREEN CACHES for static-per-rebuild content ──────────────────────────
+let _topoCache=null, _scanlineCache=null, _fogCache=null, _gridCache=null;
+
+function buildTopoCache(){
+  if(!_topoCache){ _topoCache=document.createElement('canvas'); }
+  _topoCache.width=W; _topoCache.height=H;
+  const ctx=_topoCache.getContext('2d');
   const layer=TERRAIN_LAYERS[2];
-  ctx.save();
+  // Step by 6px instead of 3px — half the path segments, visually identical at wallpaper scale
   for(let elev=60;elev<=500;elev+=60){
     const ty=layer.baseY-elev+terrainH(W*.5,layer.seed)*layer.amplitude;
     ctx.beginPath(); let drawing=false;
-    for(let x=0;x<=W;x+=3){
+    for(let x=0;x<=W;x+=6){
       const surfY=layer.baseY+terrainH(x,layer.seed)*layer.amplitude;
       if(surfY<=ty+2){ drawing?ctx.lineTo(x,ty):ctx.moveTo(x,ty); drawing=true; }
       else { drawing=false; }
     }
     ctx.strokeStyle=ac(0.05+elev/500*0.06);ctx.lineWidth=0.8;ctx.stroke();
   }
-  ctx.restore();
+}
+
+function buildScanlineCache(){
+  if(!_scanlineCache){ _scanlineCache=document.createElement('canvas'); }
+  _scanlineCache.width=W; _scanlineCache.height=H;
+  const ctx=_scanlineCache.getContext('2d');
+  ctx.fillStyle='rgba(0,0,0,0.03)';
+  for(let y=0;y<H;y+=4)ctx.fillRect(0,y,W,2);
+}
+
+function buildFogCache(){
+  if(!_fogCache){ _fogCache=document.createElement('canvas'); }
+  _fogCache.width=W; _fogCache.height=H;
+  const ctx=_fogCache.getContext('2d');
+  TERRAIN_LAYERS.forEach(layer=>{
+    if(layer.fog<=0)return;
+    const fogY=layer.baseY+terrainH(W*.5,layer.seed)*layer.amplitude;
+    const fg=ctx.createLinearGradient(0,fogY-40,0,fogY+80);
+    fg.addColorStop(0,'rgba(0,0,0,0)');fg.addColorStop(0.4,`rgba(8,25,60,${layer.fog*0.15})`);fg.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=fg; ctx.fillRect(0,fogY-40,W,120);
+  });
+}
+
+function buildGridCache(){
+  if(!_gridCache){ _gridCache=document.createElement('canvas'); }
+  _gridCache.width=W; _gridCache.height=H;
+  const ctx=_gridCache.getContext('2d');
+  ctx.font='9px "Share Tech Mono"';ctx.fillStyle=ac(0.2);
+  for(let x=0;x<W;x+=240){
+    ctx.fillText(String(Math.round(x/W*100)).padStart(3,'0')+'E',x+2,H-14);
+  }
+}
+
+// ── Pre-rendered glow sprite for missile heads (replaces per-frame shadowBlur) ──
+let _missileGlow=null;
+function buildMissileGlow(){
+  const size=32;
+  _missileGlow=document.createElement('canvas');
+  _missileGlow.width=size*2; _missileGlow.height=size*2;
+  const ctx=_missileGlow.getContext('2d');
+  const g=ctx.createRadialGradient(size,size,0,size,size,size);
+  g.addColorStop(0,thr(0.6));
+  g.addColorStop(0.3,thr(0.3));
+  g.addColorStop(1,'rgba(255,60,40,0)');
+  ctx.fillStyle=g;
+  ctx.fillRect(0,0,size*2,size*2);
+}
+
+// ── Pre-rendered beam tip glow ──────────────────────────────────────────────
+let _beamGlow=null;
+function buildBeamGlow(){
+  const size=20;
+  _beamGlow=document.createElement('canvas');
+  _beamGlow.width=size*2; _beamGlow.height=size*2;
+  const ctx=_beamGlow.getContext('2d');
+  const g=ctx.createRadialGradient(size,size,0,size,size,size);
+  g.addColorStop(0,alt(0.9));
+  g.addColorStop(0.4,alt(0.3));
+  g.addColorStop(1,'rgba(0,220,255,0)');
+  ctx.fillStyle=g;
+  ctx.fillRect(0,0,size*2,size*2);
 }
 
 // ── SCENE STATE (rebuilt on resize) ──────────────────────────────────────────
 let TERRAIN_LAYERS, PEAK_X, PEAK_Y_NEAR, LAYERS, SHIELD, MISSILES, PARTICLES;
 
 // ── REBUILD SCENE ────────────────────────────────────────────────────────────
-// Called once on load and again on every resize.
-// Re-derives all W/H-dependent layout values and redraws the static canvases.
 function rebuildScene(){
-  // Safety: if W or H isn't valid yet, retry after a short delay
   if(!W||!H||W<10||H<10){
     setTimeout(rebuildScene, 50);
     return;
   }
-  c1.clearRect(0,0,W,H);
-  c2.clearRect(0,0,W,H);
 
-  // Layer definitions — all Y values are H-relative fractions
+  // Invalidate caches
+  _shieldCache=null; _shieldCacheTime=-999;
+  Object.keys(_colorCache).forEach(k=>delete _colorCache[k]);
+
   TERRAIN_LAYERS=[
     {seed:0.0,baseY:H*.52,amplitude:1.0, colorBase:T.terrainLow[0],colorPeak:T.terrainHi[0],edge:ac(.25),fog:0.55},
     {seed:1.8,baseY:H*.62,amplitude:0.78,colorBase:T.terrainLow[1],colorPeak:T.terrainHi[1],edge:ac(.35),fog:0.35},
@@ -312,41 +368,50 @@ function rebuildScene(){
   PEAK_X      = W*0.5;
   PEAK_Y_NEAR = TERRAIN_LAYERS[2].baseY + terrainH(PEAK_X,TERRAIN_LAYERS[2].seed)*TERRAIN_LAYERS[2].amplitude - 22;
 
-  // ── Sky + stars ────────────────────────────────────────────────────────────
-  const skyG=c1.createLinearGradient(0,0,0,H*0.65);
+  // ── Draw static layer (sky + stars + aurora + terrain) to cStatic ──────────
+  csCtx.clearRect(0,0,W,H);
+  const skyG=csCtx.createLinearGradient(0,0,0,H*0.65);
   skyG.addColorStop(0,T.sky0);skyG.addColorStop(0.35,T.sky1);skyG.addColorStop(1,T.sky2);
-  c1.fillStyle=skyG; c1.fillRect(0,0,W,H);
+  csCtx.fillStyle=skyG; csCtx.fillRect(0,0,W,H);
   for(let i=0;i<220;i++){
     const x=rand(0,W),y=rand(0,H*.58),r=rand(.3,1.6),a=rand(.2,.85);
-    c1.beginPath();c1.arc(x,y,r,0,TAU);
-    c1.fillStyle=`rgba(${180+rand(0,60)},${200+rand(0,40)},255,${a})`;c1.fill();
+    csCtx.beginPath();csCtx.arc(x,y,r,0,TAU);
+    csCtx.fillStyle=`rgba(${180+Math.round(rand(0,60))},${200+Math.round(rand(0,40))},255,${a.toFixed(2)})`;csCtx.fill();
   }
-  const aurora=c1.createRadialGradient(W*.5,H*.48,0,W*.5,H*.48,W*.55);
+  const aurora=csCtx.createRadialGradient(W*.5,H*.48,0,W*.5,H*.48,W*.55);
   aurora.addColorStop(0,T.aurora);aurora.addColorStop(0.4,T.aurora.replace(/[^,]+\)$/,'0.07)'));aurora.addColorStop(1,'rgba(0,0,0,0)');
-  c1.fillStyle=aurora; c1.fillRect(0,0,W,H*.65);
+  csCtx.fillStyle=aurora; csCtx.fillRect(0,0,W,H*.65);
   [H*.38,H*.44,H*.50].forEach((y,i)=>{
-    const ag=c1.createLinearGradient(0,y-20,0,y+20);
+    const ag=csCtx.createLinearGradient(0,y-20,0,y+20);
     ag.addColorStop(0,'rgba(0,0,0,0)');ag.addColorStop(0.5,`rgba(${T.accent[0]},${Math.round(T.accent[1]*.5)},${T.accent[2]},${0.06-i*.015})`);ag.addColorStop(1,'rgba(0,0,0,0)');
-    c1.fillStyle=ag; c1.fillRect(0,y-20,W,40);
+    csCtx.fillStyle=ag; csCtx.fillRect(0,y-20,W,40);
   });
 
-  // ── Build and draw terrain layers to c2 ────────────────────────────────────
+  // ── Build and draw terrain to static canvas ────────────────────────────────
   LAYERS=TERRAIN_LAYERS.map(buildTerrainLayer);
   LAYERS.forEach(layer=>{
     layer.faces.forEach(f=>{
-      c2.beginPath();c2.moveTo(f.ax,f.ay);c2.lineTo(f.bx,f.by);c2.lineTo(f.cx,f.cy);c2.closePath();
-      c2.fillStyle=`rgb(${Math.round(f.r)},${Math.round(f.g)},${Math.round(f.b)})`;c2.fill();
-      c2.strokeStyle=f.edgeBright?ac(0.2+f.altitude*0.2):ac(0.08+f.altitude*0.1);
-      c2.lineWidth=f.edgeBright?0.9:0.5; c2.stroke();
+      csCtx.beginPath();csCtx.moveTo(f.ax,f.ay);csCtx.lineTo(f.bx,f.by);csCtx.lineTo(f.cx,f.cy);csCtx.closePath();
+      csCtx.fillStyle=`rgb(${Math.round(f.r)},${Math.round(f.g)},${Math.round(f.b)})`;csCtx.fill();
+      csCtx.strokeStyle=f.edgeBright?ac(0.2+f.altitude*0.2):ac(0.08+f.altitude*0.1);
+      csCtx.lineWidth=f.edgeBright?0.9:0.5; csCtx.stroke();
     });
     const COLS=80;
-    c2.beginPath();
+    csCtx.beginPath();
     for(let ci=0;ci<=COLS;ci++){
       const x=ci/COLS*W,y=layer.baseY+terrainH(x,layer.seed)*layer.amplitude;
-      ci===0?c2.moveTo(x,y):c2.lineTo(x,y);
+      ci===0?csCtx.moveTo(x,y):csCtx.lineTo(x,y);
     }
-    c2.strokeStyle=layer.edge; c2.lineWidth=1.8; c2.stroke();
+    csCtx.strokeStyle=layer.edge; csCtx.lineWidth=1.8; csCtx.stroke();
   });
+
+  // ── Build offscreen caches ────────────────────────────────────────────────
+  buildTopoCache();
+  buildScanlineCache();
+  buildFogCache();
+  buildGridCache();
+  buildMissileGlow();
+  buildBeamGlow();
 
   // ── Shield ─────────────────────────────────────────────────────────────────
   SHIELD=buildShield(PEAK_X, PEAK_Y_NEAR-55, 120);
@@ -374,38 +439,38 @@ function rebuildScene(){
 }
 
 // ── ANIMATE ──────────────────────────────────────────────────────────────────
-let t0=null;
+let t0=null, lastFrame=0;
 const FRAME_INTERVAL=1000/(CONFIG.targetFPS||15);
-function animate(){
-  const ts=performance.now();
+
+function animate(ts){
+  requestAnimationFrame(animate);
+
+  // Frame throttle — skip if not enough time has passed
+  if(ts-lastFrame<FRAME_INTERVAL) return;
+  lastFrame=ts;
+
   if(!t0)t0=ts;
   const el=(ts-t0)/1000, t=el%LOOP;
-  c3.clearRect(0,0,W,H); c4.clearRect(0,0,W,H);
+  const ctx=cdCtx;
+  ctx.clearRect(0,0,W,H);
 
-  // Fog between terrain layers
-  TERRAIN_LAYERS.forEach(layer=>{
-    if(layer.fog<=0)return;
-    const fogY=layer.baseY+terrainH(W*.5,layer.seed)*layer.amplitude;
-    const fg=c3.createLinearGradient(0,fogY-40,0,fogY+80);
-    fg.addColorStop(0,'rgba(0,0,0,0)');fg.addColorStop(0.4,`rgba(8,25,60,${layer.fog*0.15})`);fg.addColorStop(1,'rgba(0,0,0,0)');
-    c3.fillStyle=fg; c3.fillRect(0,fogY-40,W,120);
-  });
+  // ── Cached static overlays (single drawImage each — near zero cost) ────────
+  ctx.drawImage(_fogCache,0,0);
+  ctx.drawImage(_topoCache,0,0);
 
-  // Topo lines
-  drawTopoLines(c3);
-
-  // Atmosphere haze
-  const haze=c3.createLinearGradient(0,H*.50,0,H*.68);
-  haze.addColorStop(0,'rgba(0,0,0,0)');haze.addColorStop(0.5,`rgba(10,30,80,${0.08+Math.sin(t*TAU/LOOP)*0.02})`);haze.addColorStop(1,'rgba(0,0,0,0)');
-  c3.fillStyle=haze; c3.fillRect(0,H*.50,W,H*.18);
+  // Atmosphere haze — simple gradient, cheap
+  const hazeAlpha=0.08+Math.sin(t*TAU/LOOP)*0.02;
+  const haze=ctx.createLinearGradient(0,H*.50,0,H*.68);
+  haze.addColorStop(0,'rgba(0,0,0,0)');haze.addColorStop(0.5,`rgba(10,30,80,${hazeAlpha.toFixed(3)})`);haze.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=haze; ctx.fillRect(0,H*.50,W,H*.18);
 
   // Beacon glow on peak
   const beaconPulse=0.6+Math.sin(t*TAU/LOOP*2)*0.4;
-  const bg=c3.createRadialGradient(PEAK_X,PEAK_Y_NEAR,0,PEAK_X,PEAK_Y_NEAR,280);
+  const bg=ctx.createRadialGradient(PEAK_X,PEAK_Y_NEAR,0,PEAK_X,PEAK_Y_NEAR,280);
   bg.addColorStop(0,ac(0.18*beaconPulse));bg.addColorStop(0.4,ac(0.08*beaconPulse));bg.addColorStop(1,'rgba(0,0,0,0)');
-  c3.fillStyle=bg; c3.fillRect(PEAK_X-300,PEAK_Y_NEAR-200,600,420);
+  ctx.fillStyle=bg; ctx.fillRect(PEAK_X-300,PEAK_Y_NEAR-200,600,420);
 
-  // Intercept beams from shield to missile intercept point
+  // Intercept beams — no shadowBlur, use pre-rendered glow sprite
   MISSILES.forEach(m=>{
     const lt=(el+m.phase)%m.cycleT, prog=lt/m.cycleT*m.speed;
     if(prog<m.beamFireAt||prog>=m.interceptAt+0.18)return;
@@ -415,19 +480,18 @@ function animate(){
     const beamProg=clamp((prog-m.beamFireAt)/(m.interceptAt-m.beamFireAt),0,1);
     const bx=lerp(PEAK_X,ix,beamProg), by=lerp(PEAK_Y_NEAR-55,iy,beamProg);
     if(prog<m.interceptAt){
-      c3.save();
-      c3.shadowColor=alt(0.9);c3.shadowBlur=6;
-      const bg2=c3.createLinearGradient(PEAK_X,PEAK_Y_NEAR-55,bx,by);
+      const bg2=ctx.createLinearGradient(PEAK_X,PEAK_Y_NEAR-55,bx,by);
       bg2.addColorStop(0,alt(0.55));bg2.addColorStop(0.7,alt(0.45));bg2.addColorStop(1,alt(0.9));
-      c3.strokeStyle=bg2;c3.lineWidth=2+beamProg;c3.lineCap='round';
-      c3.beginPath();c3.moveTo(PEAK_X,PEAK_Y_NEAR-55);c3.lineTo(bx,by);c3.stroke();
-      c3.beginPath();c3.arc(bx,by,4,0,TAU);c3.fillStyle=alt(0.95);c3.fill();
-      c3.beginPath();c3.arc(PEAK_X,PEAK_Y_NEAR-55,5,0,TAU);c3.fillStyle=alt(0.5);c3.fill();
-      c3.restore();
+      ctx.strokeStyle=bg2;ctx.lineWidth=2+beamProg;ctx.lineCap='round';
+      ctx.beginPath();ctx.moveTo(PEAK_X,PEAK_Y_NEAR-55);ctx.lineTo(bx,by);ctx.stroke();
+      // Glow sprite instead of shadowBlur
+      ctx.drawImage(_beamGlow,bx-20,by-20);
+      ctx.beginPath();ctx.arc(bx,by,4,0,TAU);ctx.fillStyle=alt(0.95);ctx.fill();
+      ctx.beginPath();ctx.arc(PEAK_X,PEAK_Y_NEAR-55,5,0,TAU);ctx.fillStyle=alt(0.5);ctx.fill();
     }
   });
 
-  // Missiles + explosions
+  // Missiles + explosions — no shadowBlur, use glow sprites
   MISSILES.forEach(m=>{
     const lt=(el+m.phase)%m.cycleT, prog=lt/m.cycleT*m.speed;
     if(prog>=1)return;
@@ -440,34 +504,36 @@ function animate(){
       const prevProg=Math.max(0,prog-0.12);
       const prevPx=lerp(m.fromX,m.targetX,prevProg);
       const prevPy=lerp(m.fromY,m.targetY,prevProg)-Math.sin(prevProg*Math.PI)*180;
-      c3.save();
-      const tg=c3.createLinearGradient(prevPx,prevPy,px,py);
+      const tg=ctx.createLinearGradient(prevPx,prevPy,px,py);
       tg.addColorStop(0,thr(0));tg.addColorStop(0.6,thr(0));tg.addColorStop(1,thr(pa*.7));
-      c3.strokeStyle=tg;c3.lineWidth=m.size*.55;c3.lineCap='round';
-      c3.beginPath();c3.moveTo(prevPx,prevPy);c3.lineTo(px,py);c3.stroke();
-      c3.shadowColor=thr(1);c3.shadowBlur=6;
-      c3.beginPath();c3.arc(px,py,m.size,0,TAU);c3.fillStyle=thr(pa);c3.fill();
-      c3.beginPath();c3.arc(px,py,m.size*.4,0,TAU);c3.fillStyle=`rgba(255,220,200,${pa})`;c3.fill();
-      c3.restore();
+      ctx.strokeStyle=tg;ctx.lineWidth=m.size*.55;ctx.lineCap='round';
+      ctx.beginPath();ctx.moveTo(prevPx,prevPy);ctx.lineTo(px,py);ctx.stroke();
+      // Glow sprite instead of shadowBlur
+      const gs=m.size*2.5;
+      ctx.globalAlpha=pa;
+      ctx.drawImage(_missileGlow,px-gs,py-gs,gs*2,gs*2);
+      ctx.globalAlpha=1;
+      ctx.beginPath();ctx.arc(px,py,m.size,0,TAU);ctx.fillStyle=thr(pa);ctx.fill();
+      ctx.beginPath();ctx.arc(px,py,m.size*.4,0,TAU);ctx.fillStyle=`rgba(255,220,200,${pa.toFixed(2)})`;ctx.fill();
     } else if(hitting){
       const ep=(prog-m.interceptAt)/0.18;
-      c3.save();c3.globalAlpha=clamp(1-ep,0,1);
-      c3.beginPath();c3.arc(px,py,ep*55,0,TAU);
-      c3.strokeStyle=thr(0.6);c3.lineWidth=3-ep*2;c3.stroke();
+      ctx.save();ctx.globalAlpha=clamp(1-ep,0,1);
+      ctx.beginPath();ctx.arc(px,py,ep*55,0,TAU);
+      ctx.strokeStyle=thr(0.6);ctx.lineWidth=3-ep*2;ctx.stroke();
       for(let s=0;s<9;s++){
         const sa=s/9*TAU+ep, sd=ep*48;
-        c3.beginPath();c3.moveTo(px,py);c3.lineTo(px+Math.cos(sa)*sd,py+Math.sin(sa)*sd);
-        c3.strokeStyle=thr(0.7);c3.lineWidth=1.8;c3.stroke();
+        ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(px+Math.cos(sa)*sd,py+Math.sin(sa)*sd);
+        ctx.strokeStyle=thr(0.7);ctx.lineWidth=1.8;ctx.stroke();
       }
       if(ep<0.5){
         const flash=(0.5-ep)/0.5;
-        c3.globalAlpha=flash*0.85;c3.shadowColor='rgba(0,220,255,0.9)';c3.shadowBlur=8;
-        c3.beginPath();c3.arc(px,py,ep*70,0,TAU);
-        c3.strokeStyle=`rgba(0,220,255,${flash*0.8})`;c3.lineWidth=2*(1-ep);c3.stroke();
-        c3.beginPath();c3.arc(px,py,ep*35,0,TAU);
-        c3.strokeStyle=`rgba(120,240,255,${flash*0.6})`;c3.lineWidth=1.5;c3.stroke();
+        ctx.globalAlpha=flash*0.85;
+        ctx.beginPath();ctx.arc(px,py,ep*70,0,TAU);
+        ctx.strokeStyle=`rgba(0,220,255,${(flash*0.8).toFixed(2)})`;ctx.lineWidth=2*(1-ep);ctx.stroke();
+        ctx.beginPath();ctx.arc(px,py,ep*35,0,TAU);
+        ctx.strokeStyle=`rgba(120,240,255,${(flash*0.6).toFixed(2)})`;ctx.lineWidth=1.5;ctx.stroke();
       }
-      c3.restore();
+      ctx.restore();
     }
   });
 
@@ -476,79 +542,67 @@ function animate(){
     const px=((p.x+el*p.vx*60)%W+W)%W;
     const py=((p.y+el*p.vy*60)%H+H)%H;
     const pa=p.a*(0.5+Math.sin(el*1.5+p.ph)*.5);
-    c3.beginPath();c3.arc(px,py,p.r,0,TAU);
-    c3.fillStyle=ac(pa);c3.fill();
+    ctx.beginPath();ctx.arc(px,py,p.r,0,TAU);
+    ctx.fillStyle=ac(pa);ctx.fill();
   });
 
-  // Shield
-  drawShield(c4,SHIELD,el,0.92);
+  // Shield (has its own internal cache)
+  drawShield(ctx,SHIELD,el,0.92);
 
-  // Grid reference
-  c4.save();c4.font='9px "Share Tech Mono"';c4.fillStyle=ac(0.2);
-  for(let x=0;x<W;x+=240){
-    c4.fillText(String(Math.round(x/W*100)).padStart(3,'0')+'E',x+2,H-14);
-  }
-  c4.restore();
-
-  // Scanlines
-  c4.save();c4.fillStyle='rgba(0,0,0,0.03)';
-  for(let y=0;y<H;y+=4)c4.fillRect(0,y,W,2);
-  c4.restore();
+  // Cached static overlays
+  ctx.drawImage(_gridCache,0,0);
+  ctx.drawImage(_scanlineCache,0,0);
 
   // Corner brackets
   const bA=0.25+Math.sin(t*TAU/LOOP)*.08;
+  ctx.strokeStyle=ac(bA);ctx.lineWidth=1.5;
   [[24,24,1,1],[W-24,24,-1,1],[24,H-24,1,-1],[W-24,H-24,-1,-1]].forEach(([cx,cy,sx,sy])=>{
-    c4.strokeStyle=ac(bA);c4.lineWidth=1.5;
-    c4.beginPath();c4.moveTo(cx+sx*44,cy);c4.lineTo(cx,cy);c4.lineTo(cx,cy+sy*44);c4.stroke();
+    ctx.beginPath();ctx.moveTo(cx+sx*44,cy);ctx.lineTo(cx,cy);ctx.lineTo(cx,cy+sy*44);ctx.stroke();
   });
 
-  // ── JCOMS TACTICAL label — sits just below the shield ───────────────
-  // Text position: centred on PEAK_X, just below shield bottom edge
-  const labelY = PEAK_Y_NEAR + SHIELD.BOT + 52;  // shield bottom + padding
-  c4.save();
-  c4.textAlign='center';
+  // ── Title/subtitle — no shadowBlur, use layered text for glow effect ───────
+  const labelY = PEAK_Y_NEAR + SHIELD.BOT + 52;
+  ctx.save();
+  ctx.textAlign='center';
 
-  // Rule line above title
-  const lineGrad=c4.createLinearGradient(W*.3,labelY-18,W*.7,labelY-18);
-  lineGrad.addColorStop(0,ac(0));
-  lineGrad.addColorStop(0.3,ac(0.25+Math.sin(t*TAU/LOOP)*0.08));
-  lineGrad.addColorStop(0.7,ac(0.25+Math.sin(t*TAU/LOOP)*0.08));
-  lineGrad.addColorStop(1,ac(0));
-  c4.strokeStyle=lineGrad; c4.lineWidth=0.8;
-  c4.beginPath(); c4.moveTo(W*.3,labelY-18); c4.lineTo(W*.7,labelY-18); c4.stroke();
+  // Rule line
+  const lineGrad=ctx.createLinearGradient(W*.3,labelY-18,W*.7,labelY-18);
+  const linePulse=ac(0.25+Math.sin(t*TAU/LOOP)*0.08);
+  lineGrad.addColorStop(0,ac(0));lineGrad.addColorStop(0.3,linePulse);lineGrad.addColorStop(0.7,linePulse);lineGrad.addColorStop(1,ac(0));
+  ctx.strokeStyle=lineGrad; ctx.lineWidth=0.8;
+  ctx.beginPath(); ctx.moveTo(W*.3,labelY-18); ctx.lineTo(W*.7,labelY-18); ctx.stroke();
 
-  // Main title — two passes: outer glow then crisp
+  // Title — layered alpha passes to simulate glow without shadowBlur
   const titlePulse=0.72+Math.sin(t*TAU/LOOP*1.5)*0.18;
-  c4.font='bold 46px "Share Tech Mono"';
-  c4.shadowColor=`rgba(${T.titleGlow.join(',')},0.9)`; c4.shadowBlur=12;
-  c4.fillStyle=`rgba(${T.accent.join(',')},${titlePulse*0.5})`;
-  c4.fillText(CONFIG.title, W/2, labelY);
-  c4.shadowBlur=4;
-  c4.fillStyle=`rgba(${T.titleLight.join(',')},${titlePulse})`;
-  c4.fillText(CONFIG.title, W/2, labelY);
+  ctx.font='bold 46px "Share Tech Mono"';
+  // Soft glow pass (thicker, low alpha)
+  ctx.lineWidth=6;
+  ctx.strokeStyle=`rgba(${T.titleGlow[0]},${T.titleGlow[1]},${T.titleGlow[2]},${(titlePulse*0.15).toFixed(2)})`;
+  ctx.strokeText(CONFIG.title, W/2, labelY);
+  // Accent fill
+  ctx.fillStyle=`rgba(${T.accent[0]},${T.accent[1]},${T.accent[2]},${(titlePulse*0.5).toFixed(2)})`;
+  ctx.fillText(CONFIG.title, W/2, labelY);
+  // Crisp bright fill
+  ctx.fillStyle=`rgba(${T.titleLight[0]},${T.titleLight[1]},${T.titleLight[2]},${titlePulse.toFixed(2)})`;
+  ctx.fillText(CONFIG.title, W/2, labelY);
 
   // Subtitle
-  c4.shadowBlur=0; c4.shadowColor='transparent';
-  c4.font='11px "Share Tech Mono"';
-  c4.fillStyle=ac(0.45+Math.sin(t*TAU/LOOP)*0.1);
-  c4.fillText(CONFIG.subtitle, W/2, labelY+22);
+  ctx.font='11px "Share Tech Mono"';
+  ctx.fillStyle=ac(0.45+Math.sin(t*TAU/LOOP)*0.1);
+  ctx.fillText(CONFIG.subtitle, W/2, labelY+22);
 
-  c4.restore();
-  setTimeout(animate, FRAME_INTERVAL);
+  ctx.restore();
 }
 
 // ── BOOT ─────────────────────────────────────────────────────────────────────
-// Wait for the browser to finish layout before building the terrain mesh.
-// This prevents W/H being 0 in Firefox kiosk / wallpaper mode at startup.
 function boot(){
   resizeCanvases();
   if(!W||!H||W<10||H<10){
-    // Layout not ready — retry in 50ms
     setTimeout(boot,50);
     return;
   }
   rebuildScene();
-  animate();
+  requestAnimationFrame(animate);
 }
 if(document.readyState==='complete'){
   boot();
