@@ -78,6 +78,9 @@ const THEMES = {
 
 const T = THEMES[CONFIG.theme] || THEMES.blue;
 
+// ── Prevent browser from opening dropped files ──────────────────────────────
+for(const ev of ['dragover','drop']) document.addEventListener(ev, e=>{e.preventDefault();e.stopPropagation();});
+
 // ── Pre-computed color strings (avoid per-frame allocations) ──────────────────
 const _colorCache = {};
 function ac(a=1){
